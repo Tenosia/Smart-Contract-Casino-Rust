@@ -8,7 +8,7 @@ This program allows two users to securely deposit SOL into an escrow account, wi
 
 ## Contact
 
-If you have any quesion, contact here: [Telegram](https://t.me/shiny0103) | [Twitter](https://x.com/0xTan1319)
+If you have any quesion, contact here: [Telegram](https://t.me/Rust0x_726) 
 
 ## Features
 
