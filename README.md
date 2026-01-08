@@ -14,6 +14,9 @@ This Solana program implements an escrow system where two players can deposit SO
 - **Rent Exemption**: Ensures escrow accounts meet Solana's rent exemption requirements
 - **Secure Storage**: Uses PDA (Program Derived Address) for secure fund custody
 - **Access Control**: Validates that only authorized parties can interact with escrow accounts
+- **Overflow Protection**: All arithmetic operations use checked math to prevent integer overflow
+- **Input Validation**: Minimum deposit amounts, result validation, and comprehensive account checks
+- **State Management**: Proper initialization checks and prevents double deposits
 
 ## Architecture
 
@@ -40,7 +43,15 @@ The Escrow state account contains:
 
 #### InitEscrow
 
-Initializes or joins an escrow account. When a creator initializes (is_cretor = 1), their public key and deposit amount are recorded. When a competitor joins (is_cretor = 0), their public key is recorded and the amount is added to the existing escrow.
+Initializes or joins an escrow account. When a creator initializes (is_creator = 1), their public key and deposit amount are recorded. When a competitor joins (is_creator = 0), their public key is recorded and the amount is added to the existing escrow.
+
+**Validations:**
+- Minimum deposit amount must be met (1000 lamports)
+- Escrow account must be owned by the program
+- PDA account must match the derived PDA
+- System program account must be the actual system program
+- Rent exemption is verified
+- Overflow protection for fee calculations
 
 **Accounts Required:**
 - Sender (signer)
@@ -58,7 +69,18 @@ Initializes or joins an escrow account. When a creator initializes (is_cretor = 
 
 #### WithdrawEscrow
 
-Allows an admin to withdraw funds from the escrow to the winner. The result parameter (0 or 1) determines the payout recipient, and the amount must match the total escrow amount.
+Allows an admin to withdraw funds from the escrow to the winner. The result parameter (0 = creator wins, 1 = competitor wins) determines the payout recipient, and the amount must match the total escrow amount.
+
+**Validations:**
+- Escrow must be initialized
+- Both players must have deposited
+- Result value must be 0 or 1
+- Escrow account must be owned by the program
+- PDA account must match the derived PDA
+- System program account must be the actual system program
+- Account ownership is verified for creator and competitor
+- Withdraw account must match the winner based on result
+- Amount validation ensures correct withdrawal amounts
 
 **Accounts Required:**
 - Admin account (signer)
@@ -95,6 +117,13 @@ The program includes custom error types:
 - InvalidAmount
 - InvalidOwner
 - InvalidPdaSeeds
+- EscrowNotInitialized
+- InvalidResultValue
+- MinimumAmountNotMet
+- BothPlayersMustDeposit
+- InvalidAccountOwner
+- InvalidSystemProgram
+- InvalidPdaAccount
 
 ## Development
 
@@ -147,11 +176,33 @@ chess-smart-contract/
 
 ## Security Considerations
 
+### Access Control
 - Only the admin account can execute withdrawals
-- Escrow accounts must be rent-exempt
+- Signer validation for all required accounts
+- Account ownership verification for escrow accounts
+- PDA account validation ensures funds are stored securely
+
+### Input Validation
+- Minimum deposit amount enforcement (1000 lamports)
+- Result value validation (must be 0 or 1)
 - Amount validation ensures correct withdrawal amounts
-- Account ownership is verified before operations
-- PDA ensures secure fund custody
+- Both players must deposit before withdrawal
+
+### Account Security
+- Escrow accounts must be rent-exempt
+- System program account validation
+- PDA derivation and verification
+- Account ownership checks before all operations
+
+### Overflow Protection
+- All arithmetic operations use checked math to prevent overflow
+- Fee calculations are protected against integer overflow
+- Amount additions use checked_add to prevent overflow
+
+### State Management
+- Escrow initialization state is verified
+- Prevents double initialization
+- Ensures both players have joined before withdrawal
 
 ## License
 

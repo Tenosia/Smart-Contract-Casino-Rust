@@ -27,6 +27,27 @@ pub enum EscrowError {
     InvalidOwner,
     #[error("Invalid PDA Seeds")]
     InvalidPdaSeeds,
+    /// Escrow Not Initialized
+    #[error("Escrow Not Initialized")]
+    EscrowNotInitialized,
+    /// Invalid Result Value
+    #[error("Invalid Result Value")]
+    InvalidResultValue,
+    /// Minimum Amount Not Met
+    #[error("Minimum Amount Not Met")]
+    MinimumAmountNotMet,
+    /// Both Players Must Deposit
+    #[error("Both Players Must Deposit")]
+    BothPlayersMustDeposit,
+    /// Invalid Account Owner
+    #[error("Invalid Account Owner")]
+    InvalidAccountOwner,
+    /// Invalid System Program
+    #[error("Invalid System Program")]
+    InvalidSystemProgram,
+    /// Invalid PDA Account
+    #[error("Invalid PDA Account")]
+    InvalidPdaAccount,
 
 }
 

@@ -1,35 +1,36 @@
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
-    msg,
     program::{invoke, invoke_signed},
     program_error::ProgramError,
-    system_instruction,
-    sysvar::{rent::Rent, Sysvar}, 
     program_pack::Pack,
     pubkey::Pubkey,
+    system_instruction,
+    sysvar::{rent::Rent, Sysvar},
 };
 
 use crate::{error::EscrowError, instruction::EscrowInstruction, state::Escrow};
 
+const MINIMUM_DEPOSIT: u64 = 1000; // Minimum deposit amount in lamports
+const FEE_PERCENTAGE: u64 = 19; // 1.9% = 19/1000
+const ADMIN_PERCENTAGE: u64 = 1; // 0.1% = 1/1000
+const ESCROW_PERCENTAGE: u64 = 980; // 98% = 980/1000
+
 pub struct Processor;
+
 impl Processor {
     pub fn process(
         accounts: &[AccountInfo],
         instruction_data: &[u8],
-        program_id: &Pubkey
+        program_id: &Pubkey,
     ) -> ProgramResult {
-        msg!("Process -> Instruction");
         let instruction = EscrowInstruction::unpack(instruction_data)?;
 
-        msg!("Instruction -> Init");
         match instruction {
-            EscrowInstruction::InitEscrow { is_cretor, amount } => {
-                msg!("Instruction: InitEscrow");
-                Self::process_init_escrow(accounts, is_cretor, amount)
+            EscrowInstruction::InitEscrow { is_creator, amount } => {
+                Self::process_init_escrow(accounts, is_creator, amount, program_id)
             }
-            EscrowInstruction::WithdrawEscrow { result, amount} => {
-                msg!("Instruction: WithdrawEscrow");
+            EscrowInstruction::WithdrawEscrow { result, amount } => {
                 Self::process_withdraw(accounts, result, amount, program_id)
             }
         }
@@ -37,203 +38,268 @@ impl Processor {
 
     fn process_init_escrow(
         accounts: &[AccountInfo],
-        is_cretor: u8,
+        is_creator: u8,
         amount: u64,
+        program_id: &Pubkey,
     ) -> ProgramResult {
-
         let account_info_iter = &mut accounts.iter();
 
         let sender = next_account_info(account_info_iter)?;
-        // msg!("Taker Pubkey : {}", taker_account.key);
-
         if !sender.is_signer {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
+        if amount < MINIMUM_DEPOSIT {
+            return Err(EscrowError::MinimumAmountNotMet.into());
+        }
+
         let fee_account = next_account_info(account_info_iter)?;
-
         let admin_account = next_account_info(account_info_iter)?;
-
-
         let escrow_account = next_account_info(account_info_iter)?;
-        // msg!("Escrow account Pubkey : {}", escrow_account.key );
-
         let pda_account = next_account_info(account_info_iter)?;
-        // msg!("PDA account Pubkey : {}", pda_account.key );
-
         let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
+        let system_program_account = next_account_info(account_info_iter)?;
+
+        // Validate system program
+        if *system_program_account.key != solana_program::system_program::id() {
+            return Err(EscrowError::InvalidSystemProgram.into());
+        }
+
+        // Validate escrow account ownership
+        if escrow_account.owner != program_id {
+            return Err(EscrowError::InvalidAccountOwner.into());
+        }
+
+        // Validate PDA account
+        let (expected_pda, _nonce) = Pubkey::find_program_address(&[b"chess"], program_id);
+        if *pda_account.key != expected_pda {
+            return Err(EscrowError::InvalidPdaAccount.into());
+        }
 
         if !rent.is_exempt(escrow_account.lamports(), escrow_account.data_len()) {
             return Err(EscrowError::NotRentExempt.into());
         }
 
-        let system_program_account = next_account_info(account_info_iter)?;
+        // Calculate fees with overflow protection
+        let fee_amount = amount
+            .checked_mul(FEE_PERCENTAGE)
+            .and_then(|x| x.checked_div(1000))
+            .ok_or(EscrowError::AmountOverflow)?;
 
+        let admin_amount = amount
+            .checked_mul(ADMIN_PERCENTAGE)
+            .and_then(|x| x.checked_div(1000))
+            .ok_or(EscrowError::AmountOverflow)?;
+
+        let escrow_amount = amount
+            .checked_mul(ESCROW_PERCENTAGE)
+            .and_then(|x| x.checked_div(1000))
+            .ok_or(EscrowError::AmountOverflow)?;
+
+        // Verify total matches (with rounding tolerance)
+        let total_distributed = fee_amount
+            .checked_add(admin_amount)
+            .and_then(|x| x.checked_add(escrow_amount))
+            .ok_or(EscrowError::AmountOverflow)?;
+
+        if total_distributed > amount {
+            return Err(EscrowError::AmountOverflow.into());
+        }
+
+        // Update escrow state
         {
             let mut escrow_info = Escrow::unpack_unchecked(&escrow_account.data.borrow())?;
-    
-            escrow_info.is_initialized = true;
-            if is_cretor == 1 {
+
+            if is_creator == 1 {
+                if escrow_info.is_initialized && escrow_info.creator_pubkey != Pubkey::default() {
+                    return Err(EscrowError::InvalidAccount.into());
+                }
+                escrow_info.is_initialized = true;
                 escrow_info.creator_pubkey = *sender.key;
+                // Store full deposit amount (not escrow amount) for consistency with withdraw logic
                 escrow_info.amount = amount;
-            }
-            else {
+            } else {
+                if !escrow_info.is_initialized {
+                    return Err(EscrowError::EscrowNotInitialized.into());
+                }
+                if escrow_info.competitor_pubkey != Pubkey::default() {
+                    return Err(EscrowError::InvalidAccount.into());
+                }
                 escrow_info.competitor_pubkey = *sender.key;
-                escrow_info.amount += amount;
+                // Add full deposit amount (not escrow amount) to existing amount
+                escrow_info.amount = escrow_info
+                    .amount
+                    .checked_add(amount)
+                    .ok_or(EscrowError::AmountOverflow)?;
             }
 
             Escrow::pack(escrow_info, &mut escrow_account.try_borrow_mut_data()?)?;
         }
 
-        //----- Transfer Some Sol from Initializer to escrow
-
+        // Transfer fees
         Self::transfer_sol(
             &[
-                sender.clone(),     //source
-                fee_account.clone(),     //destination
+                sender.clone(),
+                fee_account.clone(),
                 system_program_account.clone(),
             ],
-            amount * 19 / 1000
+            fee_amount,
         )?;
 
         Self::transfer_sol(
             &[
-                sender.clone(),     //source
-                admin_account.clone(),     //destination
+                sender.clone(),
+                admin_account.clone(),
                 system_program_account.clone(),
             ],
-            amount * 1 /1000
+            admin_amount,
         )?;
 
+        // Transfer to escrow PDA
         Self::transfer_sol(
             &[
-                sender.clone(),     //source
-                pda_account.clone(),     //destination
+                sender.clone(),
+                pda_account.clone(),
                 system_program_account.clone(),
             ],
-            amount * 98 / 100
+            escrow_amount,
         )?;
 
         Ok(())
     }
 
-    //==========================================================================
     fn process_withdraw(
         accounts: &[AccountInfo],
         result: u8,
         amount: u64,
-        program_id: &Pubkey
+        program_id: &Pubkey,
     ) -> ProgramResult {
-
-        msg!("processing withdraw...");
-        msg!("result : {}", result);
-        msg!("amount : {}", amount);
+        // Validate result value (0 = creator wins, 1 = competitor wins)
+        if result > 1 {
+            return Err(EscrowError::InvalidResultValue.into());
+        }
 
         let account_info_iter = &mut accounts.iter();
 
         let admin_account = next_account_info(account_info_iter)?;
-        msg!("Admin account Pubkey : {}", admin_account.key );
-        
         if !admin_account.is_signer {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        msg!("admin_info");
-
         let escrow_account = next_account_info(account_info_iter)?;
-        msg!("Escrow account Pubkey : {}", escrow_account.key );
-
-        let escrow_info = Escrow::unpack_unchecked(&escrow_account.data.borrow())?;
-
-        msg!("next");
-
         let pda_account = next_account_info(account_info_iter)?;
-        // msg!("PDA account Pubkey : {}", pda_account.key );
-
         let system_program_account = next_account_info(account_info_iter)?;
-
         let creator = next_account_info(account_info_iter)?;
-        msg!("creator Pubkey : {}", creator.key );
-        
-        if escrow_info.creator_pubkey != *creator.key {
-            return Err(ProgramError::InvalidAccountData);
+        let withdraw_account = next_account_info(account_info_iter)?;
+
+        // Validate system program
+        if *system_program_account.key != solana_program::system_program::id() {
+            return Err(EscrowError::InvalidSystemProgram.into());
         }
 
-        let competitor;
-        if result == 1 {
-            competitor = next_account_info(account_info_iter)?;
-            msg!("competitor Pubkey : {}", competitor.key );
+        // Validate escrow account ownership
+        if escrow_account.owner != program_id {
+            return Err(EscrowError::InvalidAccountOwner.into());
+        }
 
+        // Validate PDA account
+        let (expected_pda, nonce) = Pubkey::find_program_address(&[b"chess"], program_id);
+        if *pda_account.key != expected_pda {
+            return Err(EscrowError::InvalidPdaAccount.into());
+        }
+
+        // Unpack and validate escrow state
+        let escrow_info = Escrow::unpack_unchecked(&escrow_account.data.borrow())?;
+
+        if !escrow_info.is_initialized {
+            return Err(EscrowError::EscrowNotInitialized.into());
+        }
+
+        // Verify both players have deposited (competitor must have joined)
+        if escrow_info.competitor_pubkey == Pubkey::default() {
+            return Err(EscrowError::BothPlayersMustDeposit.into());
+        }
+
+        // Validate creator account
+        if escrow_info.creator_pubkey != *creator.key {
+            return Err(EscrowError::InvalidAccount.into());
+        }
+
+        // Validate competitor account if result = 1
+        if result == 1 {
+            let competitor = next_account_info(account_info_iter)?;
             if escrow_info.competitor_pubkey != *competitor.key {
-                return Err(ProgramError::InvalidAccountData);
+                return Err(EscrowError::InvalidAccount.into());
+            }
+            // Verify withdraw account matches competitor
+            if *withdraw_account.key != escrow_info.competitor_pubkey {
+                return Err(EscrowError::InvalidAccount.into());
+            }
+        } else {
+            // Verify withdraw account matches creator
+            if *withdraw_account.key != escrow_info.creator_pubkey {
+                return Err(EscrowError::InvalidAccount.into());
             }
         }
 
-        let (pda, nonce) = Pubkey::find_program_address(&[b"chess"], program_id);
-
-        let withdraw_account = next_account_info(account_info_iter)?;
-        msg!("withdraw_account Pubkey : {}", withdraw_account.key );
-
-        // msg!("withdraw_account : {}", withdraw_account.key);
-        
+        // Validate amount matches escrow amount
         if amount != escrow_info.amount {
             return Err(EscrowError::InvalidAmount.into());
         }
 
-        msg!("Sending Sol to the winner account...");
+        // Calculate withdrawal amount (98% of total)
+        let withdrawal_amount = amount
+            .checked_mul(ESCROW_PERCENTAGE)
+            .and_then(|x| x.checked_div(1000))
+            .ok_or(EscrowError::AmountOverflow)?;
 
+        // Transfer funds from PDA to winner
         let sol_ix = system_instruction::transfer(
             pda_account.key,
             withdraw_account.key,
-            amount * 98 / 100,
+            withdrawal_amount,
         );
-        
+
+        // CRITICAL FIX: Check return value of invoke_signed
         invoke_signed(
-            &sol_ix, 
+            &sol_ix,
             &[
                 pda_account.clone(),
                 withdraw_account.clone(),
-                system_program_account.clone()
-            ], 
-            &[&[&b"chess"[..], &[nonce]]]
-        );
+                system_program_account.clone(),
+            ],
+            &[&[&b"chess"[..], &[nonce]]],
+        )?;
 
-
-        // **withdraw_account.try_borrow_mut_lamports()? = withdraw_account
-        //     .lamports()
-        //     .checked_add(escrow_account.lamports())
-        //     .ok_or(EscrowError::AmountOverflow)?;
-        // **escrow_account.try_borrow_mut_lamports()? = 0;
-        // *escrow_account.try_borrow_mut_data()? = &mut [];
-       
         Ok(())
     }
 
-    fn transfer_sol(
-        accounts: &[AccountInfo], 
-        lamports: u64,
-    ) -> ProgramResult{
+    fn transfer_sol(accounts: &[AccountInfo], lamports: u64) -> ProgramResult {
+        if lamports == 0 {
+            return Ok(());
+        }
+
         let account_info_iter = &mut accounts.iter();
 
         let source_acc = next_account_info(account_info_iter)?;
         let dest_acc = next_account_info(account_info_iter)?;
         let system_program_acc = next_account_info(account_info_iter)?;
 
-        let sol_ix = system_instruction::transfer(
-            source_acc.key,
-            dest_acc.key,
-            lamports,
-        );
+        // Validate system program
+        if *system_program_acc.key != solana_program::system_program::id() {
+            return Err(EscrowError::InvalidSystemProgram.into());
+        }
+
+        let sol_ix = system_instruction::transfer(source_acc.key, dest_acc.key, lamports);
         invoke(
             &sol_ix,
             &[
                 source_acc.clone(),
                 dest_acc.clone(),
-                system_program_acc.clone()
+                system_program_acc.clone(),
             ],
         )?;
 
         Ok(())
     }
-
 }
