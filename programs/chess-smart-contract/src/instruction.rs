@@ -7,7 +7,7 @@ use crate::error::EscrowError::InvalidInstruction;
 
 pub enum EscrowInstruction {
     InitEscrow {
-        is_cretor: u8,
+        is_creator: u8,
         amount: u64,
     },
 
@@ -24,9 +24,9 @@ impl EscrowInstruction {
 
         Ok(match tag {
             0 => {
-                let (is_cretor, amount) = rest.split_first().ok_or(InvalidInstruction)?;
+                let (is_creator, amount) = rest.split_first().ok_or(InvalidInstruction)?;
                 Self::InitEscrow {
-                    is_cretor: *is_cretor,
+                    is_creator: *is_creator,
                     amount: Self::unpack_amount(amount)?
                 }
             },
